@@ -286,17 +286,30 @@ def download_file(base_url, filename, destination, group_name):
         raise UserWarning("Timeout communicating with dashcam at address : %s; error : %s" % (base_url, e))
 
 
-def download_recording(base_url, recording, destination):
+def disk_used_percent(destination):
+    """disk usage at destination"""
+    disk_usage = shutil.disk_usage(destination)
+    return disk_usage.used / disk_usage.total * 100.
+
+def delete_recordings(destination, grouping):
+    """delete existing recordings until disk usage below threshold"""
+    if disk_used_percent(destination) <= max_disk_used_percent:
+        return
+
+    downloaded_recordings = list(get_downloaded_recordings(destination, grouping))
+    downloaded_recordings.sort(key=lambda recording: recording.datetime)
+    while (max_disk_used_percent < disk_used_percent(destination)):
+        recording = downloaded_recordings.pop(0)
+        if dry_run:
+            logger.info("DRY RUN Would remove outdated recording : %s", recording.base_filename)
+            continue
+
+        remove_recording(destination, recording)
+
+
+def download_recording(base_url, recording, destination, grouping):
     """downloads the set of recordings, including gps data, for the given filename from the dashcam to the destination
     directory"""
-    # first checks that we have enough room left
-    disk_usage = shutil.disk_usage(destination)
-    disk_used_percent = disk_usage.used / disk_usage.total * 100.
-
-    if disk_used_percent > max_disk_used_percent:
-        raise RuntimeError("Not enough disk space left. Max used disk space percentage allowed : %s%%"
-                           % max_disk_used_percent)
-
     # whether any file of a recording (video, thumbnail, gps, accel.) was downloaded
     any_downloaded = False
 
@@ -331,6 +344,8 @@ def download_recording(base_url, recording, destination):
         else:
             recording_logger.info("DRY RUN Would download recording : %s (%s)", recording.base_filename,
                                   recording.direction)
+
+        delete_recordings(destination, grouping)
 
 
 def sort_recordings(recordings, recording_priority):
@@ -462,6 +477,20 @@ def ensure_destination(destination):
         raise RuntimeError("download destination directory not writable : %s" % destination)
 
 
+def remove_recording(destination, recording):
+    """remove all files for a recording"""
+    logger.info("Removing recording : %s", recording.base_filename)
+
+
+    recording_glob = "%s_[NEPMIOATBRXG]*.*" % recording.base_filename
+    filepath_glob = get_filepath(destination, recording.group_name, recording_glob)
+
+    filepaths = glob.glob(filepath_glob)
+
+    for filepath in filepaths:
+        os.remove(filepath)
+
+
 def prepare_destination(destination, grouping):
     """prepares the destination, ensuring it's valid and removing excess recordings"""
     # optionally removes outdated recordings
@@ -473,15 +502,7 @@ def prepare_destination(destination, grouping):
                 logger.info("DRY RUN Would remove outdated recording : %s", outdated_recording.base_filename)
                 continue
 
-            logger.info("Removing outdated recording : %s", outdated_recording.base_filename)
-
-            outdated_recording_glob = "%s_[NEPMIOATBRXG]*.*" % outdated_recording.base_filename
-            outdated_filepath_glob = get_filepath(destination, outdated_recording.group_name, outdated_recording_glob)
-
-            outdated_filepaths = glob.glob(outdated_filepath_glob)
-
-            for outdated_filepath in outdated_filepaths:
-                os.remove(outdated_filepath)
+            remove_recording(destination, outdated_recording)
 
 
 def sync(address, destination, grouping, download_priority, recording_filter):
@@ -502,7 +523,7 @@ def sync(address, destination, grouping, download_priority, recording_filter):
     sort_recordings(current_dashcam_recordings, download_priority)
 
     for recording in current_dashcam_recordings:
-        download_recording(base_url, recording, destination)
+        download_recording(base_url, recording, destination, grouping)
 
 
 def is_empty_directory(dirpath):
